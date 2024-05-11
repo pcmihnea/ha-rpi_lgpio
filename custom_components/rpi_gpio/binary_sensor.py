@@ -1,5 +1,6 @@
-"""Support for binary sensor using RPi GPIO."""
+"""Support for binary sensor using GPIO."""
 from __future__ import annotations
+from datetime import timedelta
 
 import asyncio
 
@@ -13,11 +14,12 @@ from homeassistant.const import (
     CONF_UNIQUE_ID,
     DEVICE_DEFAULT_NAME,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.reload import setup_reload_service
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.helpers.event import async_track_time_interval
 
 from . import DOMAIN, PLATFORMS, edge_detect, read_input, setup_input
 
@@ -65,7 +67,7 @@ def setup_platform(
     add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up the Raspberry PI GPIO devices."""
+    """Set up the GPIO devices."""
     setup_reload_service(hass, DOMAIN, PLATFORMS)
 
     sensors = []
@@ -74,7 +76,7 @@ def setup_platform(
     if sensors_conf is not None:
         for sensor in sensors_conf:
             sensors.append(
-                RPiGPIOBinarySensor(
+                GPIOBinarySensor(
                     sensor[CONF_NAME],
                     sensor[CONF_PORT],
                     sensor[CONF_PULL_MODE],
@@ -94,7 +96,7 @@ def setup_platform(
     ports = config[CONF_PORTS]
     for port_num, port_name in ports.items():
         sensors.append(
-            RPiGPIOBinarySensor(
+            GPIOBinarySensor(
                 port_name, port_num, pull_mode, bouncetime, invert_logic
             )
         )
@@ -102,17 +104,27 @@ def setup_platform(
     add_entities(sensors, True)
 
 
-class RPiGPIOBinarySensor(BinarySensorEntity):
-    """Represent a binary sensor that uses Raspberry Pi GPIO."""
+class GPIOBinarySensor(BinarySensorEntity):
+    """Represent a binary sensor that uses GPIO."""
 
-    async def async_read_gpio(self):
-        """Read state from GPIO."""
-        await asyncio.sleep(float(self._bouncetime) / 1000)
-        self._state = await self.hass.async_add_executor_job(read_input, self._port)
+    @callback
+    async def async_added_to_hass(self):
+        # Arm the timer
+        timer_cancel = async_track_time_interval(
+            self.hass,
+            self.update_gpio,   # launch every second
+            interval=timedelta(seconds=1),
+        )
+        # stop the timer
+        self.async_on_remove(timer_cancel)
+
+    async def update_gpio(self, _):
+        if edge_detect(self._port, self._bouncetime) is True:
+            self._state = read_input(self._port)
         self.async_write_ha_state()
 
     def __init__(self, name, port, pull_mode, bouncetime, invert_logic, unique_id=None):
-        """Initialize the RPi binary sensor."""
+        """Initialize the binary sensor."""
         self._attr_name = name or DEVICE_DEFAULT_NAME
         self._attr_unique_id = unique_id
         self._attr_should_poll = False
@@ -124,12 +136,7 @@ class RPiGPIOBinarySensor(BinarySensorEntity):
 
         setup_input(self._port, self._pull_mode)
 
-        def edge_detected(port):
-            """Edge detection handler."""
-            if self.hass is not None:
-                self.hass.add_job(self.async_read_gpio)
-
-        edge_detect(self._port, edge_detected, self._bouncetime)
+        event = edge_detect(self._port, self._bouncetime)
 
     @property
     def is_on(self):
